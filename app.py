@@ -33,7 +33,7 @@ EXCLUDE_WORDS = [
     "mall","jewellery","gold","diamond","veg","pet","petrol",
     "lulu","carrefour","starbucks","dunkin","costa",
     "guest","villa","industry","studio","roastery","rostery",
-    "butchery","park","adcb","fab","nbd","atm","city","villas","adnoc"
+    "butchery","park","adcb","fab","nbd","atm","city","villas","adnoc","spinney"
 ]
 
 
