@@ -5,6 +5,9 @@ import random
 from urllib.parse import quote_plus
 
 import pandas as pd
+import numpy as np
+
+from math import radians, sin, cos, sqrt, atan2
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -13,376 +16,366 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.common.exceptions import InvalidSessionIdException
-
 from deep_translator import GoogleTranslator
 
 
 # ============================================================
-# DRIVER
+# FMCG FILTER (SHOP NAME ONLY)
 # ============================================================
-def make_driver():
-    opts = webdriver.ChromeOptions()
 
-    opts.add_argument("--start-maximized")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=opts
-    )
-
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-
-    return driver
+EXCLUDE_WORDS = [
+    "flower","florist","book","fish","meat","restaurant","cafe","coffee",
+    "salon","barber","spa","vegetable","computer","electronics","mobile",
+    "school","college","university","police","post","atm","bank",
+    "petrol","station","parking","camp","beach","office","hotel",
+    "taxi","bus","cycle","tyre","garage","workshop","laundry",
+    "bakery","cake","sweets","pharmacy","clinic","hospital",
+    "mall","jewellery","gold","diamond","veg","pet","petrol",
+    "lulu","carrefour","starbucks","dunkin","costa",
+    "guest","villa","industry","studio","roastery","rostery",
+    "butchery","park","adcb","fab","nbd","atm","city","villas","adnoc"
+]
 
 
-# ============================================================
-# SCROLL
-# ============================================================
-def scroll_feed_fully(driver):
-
-    try:
-        feed = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located(
-                (By.XPATH, '//div[@role="feed"]')
-            )
-        )
-    except:
-        return None
-
-    last_height = 0
-    stable = 0
-
-    for _ in range(60):
-
-        driver.execute_script(
-            "arguments[0].scrollTop = arguments[0].scrollHeight",
-            feed
-        )
-
-        time.sleep(3)
-
-        new_height = driver.execute_script(
-            "return arguments[0].scrollHeight",
-            feed
-        )
-
-        if new_height == last_height:
-            stable += 1
-
-            if stable >= 3:
-                break
-        else:
-            stable = 0
-
-        last_height = new_height
-
-    return feed
+def is_valid_shop(name):
+    if pd.isna(name):
+        return False
+    name = str(name).lower()
+    return not any(x in name for x in EXCLUDE_WORDS)
 
 
 # ============================================================
-# FIND CARDS
+# TRANSLATION
 # ============================================================
-def find_cards(driver):
 
-    selectors = [
-        '//div[@role="feed"]//div[contains(@class, "Nv2PK")]',
-        '//div[@role="feed"]//a[contains(@href, "/maps/place/")]/ancestor::div[3]',
-        '//div[@role="feed"]/div/div[@jsaction]'
-    ]
-
-    for sel in selectors:
-
-        cards = driver.find_elements(By.XPATH, sel)
-
-        if cards:
-            return cards
-
-    return []
+def contains_arabic(text):
+    if pd.isna(text):
+        return False
+    return bool(re.search(r'[\u0600-\u06FF]', str(text)))
 
 
-# ============================================================
-# PARSE CARD
-# ============================================================
-def parse_card(card):
-
-    try:
-
-        text_lines = [
-            t.strip()
-            for t in card.text.split("\n")
-            if t.strip()
-        ]
-
-        if not text_lines:
-            return None
-
-        name = text_lines[0]
-
-        rating = ""
-        review_count = ""
-
-        for t in text_lines:
-
-            m = re.match(
-                r"^(\d\.\d)\s*\(([\d,]+)\)",
-                t
-            )
-
-            if m:
-                rating = m.group(1)
-                review_count = m.group(2)
-                break
-
-        address = ""
-
-        for t in text_lines:
-            if any(
-                k in t.lower()
-                for k in [
-                    "road",
-                    "market",
-                    "street",
-                    "mall"
-                ]
-            ):
-                address = t
-                break
-
-        try:
-            link = card.find_element(
-                By.XPATH,
-                './/a[contains(@href,"/maps/place/")]'
-            )
-
-            place_url = link.get_attribute("href")
-
-        except:
-            place_url = ""
-
-        return {
-            "name": name,
-            "rating": rating,
-            "review_count": review_count,
-            "address": address,
-            "place_url": place_url
-        }
-
-    except:
-        return None
-
-
-# ============================================================
-# LAT LONG
-# ============================================================
-def extract_lat_lon(url):
-
-    if not isinstance(url, str):
-        return None, None
-
-    lat = re.search(r'!3d(-?\d+\.\d+)', url)
-    lon = re.search(r'!4d(-?\d+\.\d+)', url)
-
-    if lat and lon:
-        return lat.group(1), lon.group(1)
-
-    alt = re.search(
-        r'@(-?\d+\.\d+),(-?\d+\.\d+)',
-        url
-    )
-
-    if alt:
-        return alt.group(1), alt.group(2)
-
-    return None, None
-
-
-# ============================================================
-# TRANSLATE
-# ============================================================
 def translate_text(text):
-
     try:
-
         if pd.isna(text):
+            return text
+        if not contains_arabic(text):
             return text
 
         return GoogleTranslator(
             source="auto",
             target="en"
         ).translate(str(text))
-
     except:
         return text
 
 
-# ============================================================
-# QUERY
-# ============================================================
-def run_query(driver, query):
+def format_shop_name(name):
+    if pd.isna(name):
+        return name
 
-    url = (
-        f"https://www.google.com/maps/search/"
-        f"{quote_plus(query)}"
+    name_str = str(name)
+
+    if contains_arabic(name_str):
+        translated = translate_text(name_str)
+        return f"{translated} ({name_str})"
+
+    return name_str
+
+
+# ============================================================
+# DISTANCE CALC
+# ============================================================
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+
+    lat1 = radians(float(lat1))
+    lon1 = radians(float(lon1))
+    lat2 = radians(float(lat2))
+    lon2 = radians(float(lon2))
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = (
+        sin(dlat/2)**2 +
+        cos(lat1)*cos(lat2)*sin(dlon/2)**2
     )
 
+    return 2 * atan2(sqrt(a), sqrt(1-a)) * R
+
+
+# ============================================================
+# DRIVER
+# ============================================================
+
+def make_driver():
+    options = webdriver.ChromeOptions()
+    options.add_argument("--start-maximized")
+
+    return webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options
+    )
+
+
+# ============================================================
+# SCRAPER
+# ============================================================
+
+def scroll_feed(driver):
+    try:
+        feed = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, '//div[@role="feed"]'))
+        )
+    except:
+        return
+
+    last_count = 0
+    stable = 0
+
+    for _ in range(50):
+        driver.execute_script(
+            "arguments[0].scrollTop = arguments[0].scrollHeight",
+            feed
+        )
+
+        time.sleep(2)
+
+        cards = driver.find_elements(By.XPATH, '//div[@role="feed"]//div[contains(@class,"Nv2PK")]')
+        current = len(cards)
+
+        if current == last_count:
+            stable += 1
+            if stable >= 3:
+                break
+        else:
+            stable = 0
+
+        last_count = current
+
+
+def parse_card(card):
+    try:
+        lines = [x for x in card.text.split("\n") if x.strip()]
+        if not lines:
+            return None
+
+        name = lines[0]
+        address = ""
+
+        for t in lines:
+            if any(x in t.lower() for x in ["street","road","market","uae","abu"]):
+                address = t
+                break
+
+        try:
+            url = card.find_element(By.XPATH, './/a[contains(@href,"/maps/place/")]')
+            place_url = url.get_attribute("href")
+        except:
+            place_url = ""
+
+        return {
+            "Shop Name": name,
+            "Address": address,
+            "Place URL": place_url
+        }
+
+    except:
+        return None
+
+
+def extract_lat_lon(url):
+    if not isinstance(url, str):
+        return None, None
+
+    m = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', url)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    m2 = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    if m2:
+        return float(m2.group(1)), float(m2.group(2))
+
+    return None, None
+
+
+def run_query(driver, query):
+    url = "https://www.google.com/maps/search/" + quote_plus(query)
     driver.get(url)
 
-    time.sleep(8)
+    time.sleep(6)
+    scroll_feed(driver)
 
-    scroll_feed_fully(driver)
+    cards = driver.find_elements(By.XPATH, '//div[@role="feed"]//div[contains(@class,"Nv2PK")]')
 
-    cards = find_cards(driver)
-
-    results = []
-
-    for c in cards:
-
-        p = parse_card(c)
-
-        if p:
-            results.append(p)
-
-    return results
+    return [parse_card(c) for c in cards if parse_card(c)]
 
 
 # ============================================================
-# STREAMLIT UI
+# NEAREST CUSTOMER
 # ============================================================
-st.set_page_config(
-    page_title="Google Maps Scraper",
-    layout="wide"
+
+def nearest_customer(lat, lon, cust_df):
+    if pd.isna(lat) or pd.isna(lon):
+        return pd.Series([None]*7)
+
+    temp = cust_df.copy()
+
+    temp["dist"] = temp.apply(
+        lambda r: haversine(lat, lon, r["Latitude"], r["Longitude"]),
+        axis=1
+    )
+
+    nearest = temp.loc[temp["dist"].idxmin()]
+
+    km = round(nearest["dist"], 3)
+    meters = round(km * 1000, 0)
+
+    status = "Customer" if meters <= 200 else "Prospect"
+
+    return pd.Series([
+        nearest["Customer Code"],
+        nearest["Customer Name"],
+        nearest["Latitude"],
+        nearest["Longitude"],
+        km,
+        meters,
+        status
+    ])
+
+
+# ============================================================
+# STREAMLIT APP
+# ============================================================
+
+st.set_page_config("FMCG Prospect Finder", layout="wide")
+st.title("FMCG Prospect Finder (Multi City Intelligence)")
+
+# INPUTS
+cities_input = st.text_input("Cities (comma separated)", "Abu Dhabi,Dubai,Sharjah")
+
+categories_input = st.text_area(
+    "Categories",
+    "baqala\ngrocery\nsupermarket\nhypermarket\nmini mart\nconvenience store"
 )
 
-st.title("Google Maps Shop Scraper")
+customer_file = st.file_uploader("Customer Master", type=["xlsx","csv"])
 
-city = st.text_input(
-    "Enter City",
-    "Ruwais, Abu Dhabi"
-)
 
-categories = st.text_area(
-    "Categories (one per line)",
-    """baqala
-groceries
-super market
-hyper market"""
-)
+# ============================================================
+# RUN
+# ============================================================
 
-if st.button("Start Scraping"):
+if st.button("Start"):
 
-    queries = [
-        f"{c.strip()} in {city}"
-        for c in categories.split("\n")
-        if c.strip()
-    ]
+    if customer_file is None:
+        st.error("Upload Customer Master")
+        st.stop()
 
-    all_rows = []
+    # LOAD CUSTOMER FILE
+    if customer_file.name.endswith("csv"):
+        cust = pd.read_csv(customer_file)
+    else:
+        cust = pd.read_excel(customer_file)
 
-    progress = st.progress(0)
+    cust.columns = cust.columns.str.strip()
+
+    lat_col = [c for c in cust.columns if "lat" in c.lower()][0]
+    lon_col = [c for c in cust.columns if "lon" in c.lower() or "lng" in c.lower()][0]
+
+    cust["Latitude"] = pd.to_numeric(cust[lat_col], errors="coerce")
+    cust["Longitude"] = pd.to_numeric(cust[lon_col], errors="coerce")
 
     driver = make_driver()
 
+    all_data = []
+    progress = st.progress(0)
+
+    cities = [c.strip() for c in cities_input.split(",") if c.strip()]
+    queries = [q.strip() for q in categories_input.split("\n") if q.strip()]
+
     try:
+        total = len(cities) * len(queries)
+        counter = 0
 
-        for i, query in enumerate(queries):
+        for city in cities:
+            st.write("City:", city)
 
-            st.write(f"Searching: {query}")
+            for q in queries:
+                full_query = f"{q} in {city}"
+                st.write("Searching:", full_query)
 
-            results = run_query(driver, query)
+                rows = run_query(driver, full_query)
 
-            for r in results:
-                r["query"] = query
-                all_rows.append(r)
+                for r in rows:
+                    r["City"] = city
+                    r["Query"] = full_query
+                    all_data.append(r)
 
-            progress.progress(
-                (i + 1) / len(queries)
-            )
+                counter += 1
+                progress.progress(counter / total)
 
-            time.sleep(
-                random.uniform(2, 5)
-            )
+                time.sleep(random.uniform(2, 4))
 
     finally:
         driver.quit()
 
-    if len(all_rows) == 0:
+    df = pd.DataFrame(all_data)
 
-        st.error("No results found")
+    if df.empty:
+        st.error("No data found")
+        st.stop()
 
-    else:
+    # CLEAN + TRANSLATE
+    df["Shop Name"] = df["Shop Name"].apply(format_shop_name)
+    df["Address"] = df["Address"].apply(translate_text)
 
-        df = pd.DataFrame(all_rows)
+    # FMCG FILTER
+    df = df[df["Shop Name"].apply(is_valid_shop)].reset_index(drop=True)
 
-        df["__key"] = df.apply(
-            lambda r:
-            r["place_url"]
-            if r["place_url"]
-            else f"{r['name']}|{r['address']}",
-            axis=1
-        )
+    # COORDINATES
+    df[["Shop Lat","Shop Lon"]] = df["Place URL"].apply(
+        lambda x: pd.Series(extract_lat_lon(x))
+    )
 
-        df = (
-            df.drop_duplicates("__key")
-            .drop(columns="__key")
-        )
+    # DROP NULL + DEDUPE
+    df = df.dropna(subset=["Shop Lat", "Shop Lon"])
+    df = df.drop_duplicates(subset=["Shop Lat", "Shop Lon"]).reset_index(drop=True)
 
-        df[["latitude", "longitude"]] = (
-            df["place_url"]
-            .apply(
-                lambda x:
-                pd.Series(
-                    extract_lat_lon(x)
-                )
-            )
-        )
+    # NEAREST CUSTOMER
+    df[
+        ["Cust Code","Cust Name","Cust Lat","Cust Lon","Dist KM","Dist M","Status"]
+    ] = df.apply(
+        lambda r: nearest_customer(r["Shop Lat"], r["Shop Lon"], cust),
+        axis=1
+    )
 
-        st.write(
-            f"Total Unique Shops: {len(df)}"
-        )
+    # PROSPECT ONLY
+    df = df[df["Status"] == "Prospect"].reset_index(drop=True)
 
-        with st.spinner("Translating..."):
+    # FINAL FORMAT
+    df = df[
+        [
+            "Cust Code",
+            "Cust Name",
+            "Shop Name",
+            "Address",
+            "Dist M",
+            "Place URL",
+            "Shop Lat",
+            "Shop Lon",
+            "Cust Lat",
+            "Cust Lon"
+        ]
+    ]
 
-            df["name_english"] = (
-                df["name"]
-                .apply(translate_text)
-            )
+    st.success(f"Final Prospects Found: {len(df)}")
+    st.dataframe(df, use_container_width=True)
 
-            df["address_english"] = (
-                df["address"]
-                .apply(translate_text)
-            )
+    # DOWNLOAD
+    file = "fmcg_output.xlsx"
+    df.to_excel(file, index=False)
 
-        st.dataframe(
-            df,
-            use_container_width=True
-        )
-
-        excel_file = "google_maps_output.xlsx"
-
-        with pd.ExcelWriter(
-            excel_file,
-            engine="openpyxl"
-        ) as writer:
-
-            df.to_excel(
-                writer,
-                index=False
-            )
-
-        with open(
-            excel_file,
-            "rb"
-        ) as f:
-
-            st.download_button(
-                label="Download Excel",
-                data=f,
-                file_name=excel_file,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    with open(file, "rb") as f:
+        st.download_button("Download Excel", f, file_name=file)
